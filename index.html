@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Webcam Pose Estimation</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    /* Video and canvas stacking */
+    #video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
+    #canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 2; }
+    /* Message overlay */
+    #message {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      font-family: sans-serif;
+      color: #b00;
+      background: rgba(255,255,255,0.9);
+      padding: 1em;
+      border-radius: 0.5em;
+      text-align: center;
+      max-width: 90%;
+      display: none;
+      z-index: 3;
+    }
+    #retry-button { margin-top: 0.5em; padding: 0.5em 1em; font-size: 1em; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="message"></div>
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+
+  <!-- Load TensorFlow.js runtime core -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+  <!-- Load converter for GraphModel support -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+  <!-- Load WebGL backend -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+  <!-- Load pose-detection model -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+  <script>
+    (async () => {
+      const messageEl = document.getElementById('message');
+      function showMessage(text, showRetry = false) {
+        messageEl.innerHTML = text;
+        if (showRetry) {
+          const btn = document.createElement('button');
+          btn.id = 'retry-button';
+          btn.textContent = 'Retry';
+          btn.addEventListener('click', () => location.reload());
+          messageEl.appendChild(document.createElement('br'));
+          messageEl.appendChild(btn);
+        }
+        messageEl.style.display = 'block';
+      }
+
+      async function initCamera() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('Webcam not supported by your browser.');
+        }
+        const video = document.getElementById('video');
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+          video.srcObject = stream;
+          await new Promise(res => video.onloadedmetadata = res);
+          return video;
+        } catch (err) {
+          if (['NotAllowedError','PermissionDeniedError'].includes(err.name)) {
+            throw new Error('Camera permission denied. Please allow webcam access and reload.');
+          }
+          throw new Error('Cannot access webcam: ' + err.message);
+        }
+      }
+
+      async function setupModel() {
+        try { await tf.setBackend('webgl'); } catch {};
+        await tf.ready();
+        // Create MoveNet detector
+        return poseDetection.createDetector(
+          poseDetection.SupportedModels.MoveNet,
+          { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+        );
+      }
+
+      function drawResults(ctx, poses) {
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        ctx.fillStyle = 'lime';
+        ctx.strokeStyle = 'lime';
+        ctx.lineWidth = 2;
+        poses.forEach(pose => {
+          pose.keypoints.forEach(({ x, y, score }) => {
+            if (score > 0.5) {
+              ctx.beginPath(); ctx.arc(x, y, 5, 0, 2 * Math.PI); ctx.fill();
+            }
+          });
+          poseDetection.util.getAdjacentPairs(poseDetection.SupportedModels.MoveNet)
+            .forEach(([i, j]) => {
+              const p1 = pose.keypoints[i];
+              const p2 = pose.keypoints[j];
+              if (p1.score > 0.5 && p2.score > 0.5) {
+                ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+              }
+            });
+        });
+      }
+
+      async function start() {
+        let lastTime = performance.now();
+        try {
+          showMessage('🔄 Initializing camera...');
+          const video = await initCamera();
+          showMessage('🔄 Loading pose model...');
+          const detector = await setupModel();
+          messageEl.style.display = 'none';
+
+          const canvas = document.getElementById('canvas');
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const ctx = canvas.getContext('2d');
+
+          function render() {
+            const now = performance.now();
+            detector.estimatePoses(video).then(poses => {
+              drawResults(ctx, poses);
+              const fps = 1000 / (now - lastTime);
+              lastTime = now;
+              ctx.font = '18px sans-serif';
+              ctx.fillStyle = 'yellow';
+              ctx.fillText(`FPS: ${fps.toFixed(1)}`, 10, 20);
+              ctx.fillText(`Poses: ${poses.length}`, 10, 40);
+              requestAnimationFrame(render);
+            }).catch(err => {
+              console.error('Pose error:', err);
+              showMessage('Pose estimation failed: ' + err.message, true);
+            });
+          }
+
+          render();
+        } catch (err) {
+          console.error(err);
+          showMessage(err.message, true);
+        }
+      }
+
+      start();
+    })();
+  </script>
+</body>
+</html>
